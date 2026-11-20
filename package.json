@@ -1,0 +1,44 @@
+{
+  "name": "litmiq-ci",
+  "version": "1.0.0",
+  "description": "Open-source CLI, GitHub Action and MCP connector for Litmiq regression suites. No dependencies. You bring your own provider keys.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "bin": {
+    "litmiq-ci": "./litmiq-ci.mjs",
+    "litmiq-ci-mcp": "./mcp/server.mjs"
+  },
+  "files": [
+    "litmiq-ci.mjs",
+    "action.yml",
+    "mcp/server.mjs",
+    "examples",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node tests/offline.test.mjs",
+    "validate": "node litmiq-ci.mjs examples/refund-verification.suite.json --validate"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/litmiq/litmiq-ci.git"
+  },
+  "bugs": {
+    "url": "https://github.com/litmiq/litmiq-ci/issues"
+  },
+  "homepage": "https://github.com/litmiq/litmiq-ci#readme",
+  "keywords": [
+    "litmiq",
+    "llm",
+    "eval",
+    "ci",
+    "github-action",
+    "mcp"
+  ]
+}

@@ -1,0 +1,49 @@
+name: 'Litmiq evals'
+description: 'Run a Litmiq regression suite with your own provider keys and fail the job if scores drop.'
+author: 'Litmiq'
+branding:
+  icon: 'check-circle'
+  color: 'purple'
+inputs:
+  suite:
+    description: 'Path to a Litmiq suite JSON (litmiq-suite/1).'
+    required: true
+    default: 'litmiq/litmiq-suite.json'
+  baseline:
+    description: 'Path to a baseline JSON to compare against.'
+    required: false
+    default: 'litmiq/litmiq-baseline.json'
+  out:
+    description: 'Where to write results JSON.'
+    required: false
+    default: 'litmiq-results.json'
+  update-baseline:
+    description: 'If "true", write a new baseline when this run has no regressions.'
+    required: false
+    default: 'false'
+  openai_api_key:
+    description: 'OpenAI API key. Prefer a repository secret: openai_api_key: ${{ secrets.OPENAI_API_KEY }}'
+    required: false
+    default: ''
+  anthropic_api_key:
+    description: 'Anthropic API key. Prefer a repository secret: anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}'
+    required: false
+    default: ''
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate the Litmiq suite
+      shell: bash
+      run: node "${{ github.action_path }}/litmiq-ci.mjs" "${{ inputs.suite }}" --validate
+    - name: Run the Litmiq suite
+      shell: bash
+      env:
+        OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+      run: |
+        set -euo pipefail
+        args=("${{ inputs.suite }}" --out "${{ inputs.out }}" --baseline "${{ inputs.baseline }}")
+        if [ "${{ inputs.update-baseline }}" = "true" ]; then
+          args+=(--update-baseline)
+        fi
+        node "${{ github.action_path }}/litmiq-ci.mjs" "${args[@]}"

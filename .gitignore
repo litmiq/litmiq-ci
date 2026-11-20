@@ -1,0 +1,5 @@
+node_modules/
+litmiq-results.json
+litmiq-baseline.json
+*.log
+.DS_Store
