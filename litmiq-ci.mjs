@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // litmiq-ci.mjs: run a Litmiq suite in CI with your own API keys (https://litmiq.com). No dependencies; Node 18+.
-// Usage: node litmiq-ci.mjs litmiq-suite.json [--validate] [--out litmiq-results.json] [--baseline litmiq-baseline.json] [--update-baseline]
+// Usage: node litmiq-ci.mjs litmiq-suite.json [--validate] [--out litmiq-results.json] [--baseline litmiq-baseline.json] [--update-baseline] [--max-avg-drop n] [--max-pass-rate-drop n] [--min-avg n] [--min-pass-rate n] [--max-metric-drop n] [--no-pr-comment]
 // Env: OPENAI_API_KEY (OpenAI models / judge), ANTHROPIC_API_KEY (Claude models / judge),
 //      LITMIQ_ALERT_WEBHOOK (optional Slack-compatible incoming webhook, posted to only when a regression is found),
-//      OPENAI_BASE_URL / ANTHROPIC_BASE_URL (optional, for proxies or tests).
+//      OPENAI_BASE_URL / ANTHROPIC_BASE_URL (optional, for proxies or tests),
+//      GITHUB_TOKEN + GITHUB_REPOSITORY + GITHUB_EVENT_PATH (optional, pull request comment).
 // Exit codes: 0 = pass, 1 = regression or threshold miss, 2 = usage/config error, 3 = provider errors on every call.
 // Scoring mirrors the Litmiq app: one judge call per output, metrics 0-10, "pass" = overall >= 7. Missing scores are never invented.
 import fs from 'node:fs';
+import { findProblems, normalizeCi, postPrComment, renderMarkdown, summarizeModel } from './compare.mjs';
 
 const JUDGE_SYSTEM = `You are an expert LLM output evaluator. Given a system prompt, user input, model output, and scoring criteria, evaluate the output on each metric and return a JSON object.
 
@@ -24,7 +26,7 @@ Return ONLY valid JSON in this exact format:
 
 const args = process.argv.slice(2);
 const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? (args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : true) : null; };
-const USAGE = 'usage: node litmiq-ci.mjs <suite.json> [--validate] [--out file] [--baseline file] [--update-baseline]';
+const USAGE = 'usage: node litmiq-ci.mjs <suite.json> [--validate] [--out file] [--baseline file] [--update-baseline] [--max-avg-drop n] [--max-pass-rate-drop n] [--min-avg n] [--min-pass-rate n] [--max-metric-drop n] [--no-pr-comment]';
 if (flag('--help') || flag('-h')) {
   console.log(`litmiq-ci — run a Litmiq suite in CI with your own API keys (https://litmiq.com).
 
@@ -34,13 +36,19 @@ ${USAGE}
   --out file          Write results JSON (default: litmiq-results.json)
   --baseline file     Baseline to compare (default: litmiq-baseline.json)
   --update-baseline   Write a new baseline when this run has no regressions
+  --max-avg-drop n    Override suite.ci.max_avg_drop (overall score, 0-10)
+  --max-pass-rate-drop n  Override suite.ci.max_pass_rate_drop (percentage points)
+  --min-avg n         Override suite.ci.min_avg (absolute floor)
+  --min-pass-rate n   Override suite.ci.min_pass_rate (percentage floor)
+  --max-metric-drop n Override suite.ci.max_metric_drop (per-metric score, 0-10)
+  --no-pr-comment     Do not post or update a pull request comment
 
 Exit codes: 0 = pass, 1 = regression or threshold miss, 2 = usage/config error, 3 = provider errors on every call.
-Env: OPENAI_API_KEY, ANTHROPIC_API_KEY, optional OPENAI_BASE_URL / ANTHROPIC_BASE_URL, optional LITMIQ_ALERT_WEBHOOK.
+Env: OPENAI_API_KEY, ANTHROPIC_API_KEY, optional OPENAI_BASE_URL / ANTHROPIC_BASE_URL, optional LITMIQ_ALERT_WEBHOOK, optional GITHUB_TOKEN (posts or updates a pull request comment).
 Scoring mirrors the Litmiq app: one judge call per output, metrics 0-10, pass = overall >= 7. Missing scores are never invented.`);
   process.exit(0);
 }
-const suitePath = args.find((a, i) => !a.startsWith('--') && !(i > 0 && ['--out', '--baseline'].includes(args[i - 1])));
+const suitePath = args.find((a, i) => !a.startsWith('--') && !(i > 0 && ['--out', '--baseline', '--max-avg-drop', '--max-pass-rate-drop', '--min-avg', '--min-pass-rate', '--max-metric-drop'].includes(args[i - 1])));
 if (!suitePath) { console.error(USAGE); process.exit(2); }
 let suite;
 try { suite = JSON.parse(fs.readFileSync(suitePath, 'utf8')); }
@@ -54,7 +62,13 @@ if (flag('--validate')) {
 }
 const models = (suite.models && suite.models.length ? suite.models : ['gpt-6.1-terra']).slice(0, 12);
 const judge = suite.judge_model || 'gpt-5.4-mini';
-const ci = Object.assign({ pass_score: 7, max_avg_drop: 0.5, max_pass_rate_drop: 10, min_avg: null }, suite.ci || {});
+const ci = normalizeCi(suite.ci || {});
+const override = (name, key) => { const v = flag(name); if (v !== null && v !== true) ci[key] = Number(v); };
+override('--max-avg-drop', 'max_avg_drop');
+override('--max-pass-rate-drop', 'max_pass_rate_drop');
+override('--min-avg', 'min_avg');
+override('--min-pass-rate', 'min_pass_rate');
+override('--max-metric-drop', 'max_metric_drop');
 const outPath = flag('--out') || 'litmiq-results.json';
 const basePath = flag('--baseline') || 'litmiq-baseline.json';
 const provider = (m) => /^claude-/.test(String(m)) ? 'anthropic' : 'openai';
@@ -117,30 +131,23 @@ await Promise.all(Array.from({ length: Math.min(4, jobs.length) }, worker));
 
 const summary = {};
 for (const m of models) {
-  const rs = results.filter((r) => r.model === m && r.overall !== null);
-  summary[m] = rs.length ? { scored: rs.length, avg: +(rs.reduce((a, r) => a + r.overall, 0) / rs.length).toFixed(2), pass_rate: Math.round(100 * rs.filter((r) => r.overall >= ci.pass_score).length / rs.length) } : { scored: 0, avg: null, pass_rate: null };
+  summary[m] = summarizeModel(results.filter((r) => r.model === m), ci.pass_score);
 }
 let baseline = null; try { baseline = JSON.parse(fs.readFileSync(basePath, 'utf8')); } catch (_) {}
-const problems = [];
-for (const m of models) {
-  const s = summary[m];
-  if (s.avg === null) { problems.push(`${m}: no scored outputs`); continue; }
-  if (ci.min_avg !== null && s.avg < ci.min_avg) problems.push(`${m}: average ${s.avg} is below the minimum ${ci.min_avg}`);
-  const b = baseline && baseline.summary && baseline.summary[m];
-  if (b && b.avg !== null && s.avg < b.avg - ci.max_avg_drop) problems.push(`${m}: average fell from ${b.avg} to ${s.avg}`);
-  if (b && b.pass_rate !== null && s.pass_rate < b.pass_rate - ci.max_pass_rate_drop) problems.push(`${m}: pass rate fell from ${b.pass_rate}% to ${s.pass_rate}%`);
-}
-const report = { schema: 'litmiq-results/1', suite: suite.name || 'Litmiq suite', judge_model: judge, ran_at: new Date().toISOString(), summary, regressions: problems, results };
+const problems = findProblems(summary, baseline, ci);
+const report = { schema: 'litmiq-results/1', suite: suite.name || 'Litmiq suite', judge_model: judge, ran_at: new Date().toISOString(), ci, summary, regressions: problems, results };
 fs.writeFileSync(outPath, JSON.stringify(report, null, 2) + '\n');
 if (flag('--update-baseline') || (!baseline && !problems.length)) fs.writeFileSync(basePath, JSON.stringify({ schema: 'litmiq-baseline/1', ran_at: report.ran_at, summary }, null, 2) + '\n');
 
-const md = [`## Litmiq: ${report.suite}`, '', `Judge: ${judge} · ${suite.cases.length} cases · ${models.length} models`, '', '| Model | Scored | Average | Pass rate |', '|---|---:|---:|---:|',
-  ...models.map((m) => `| ${m} | ${summary[m].scored} | ${summary[m].avg ?? 'n/a'} | ${summary[m].pass_rate === null ? 'n/a' : summary[m].pass_rate + '%'} |`), '',
-  problems.length ? '**Regressions:**\n' + problems.map((p) => '- ' + p).join('\n') : (baseline ? 'No regression against the baseline.' : 'No baseline yet: this run was saved as the baseline.'), ''].join('\n');
+const md = renderMarkdown({ suite: report.suite, judge, caseCount: suite.cases.length, models, summary, problems, baseline });
 console.log(md);
 if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + '\n');
 if (problems.length && process.env.LITMIQ_ALERT_WEBHOOK) {
   try { await fetch(process.env.LITMIQ_ALERT_WEBHOOK, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: `Litmiq regression in "${report.suite}":\n` + problems.join('\n') }) }); } catch (_) {}
+}
+if (flag('--no-pr-comment') !== true && process.env.LITMIQ_NO_PR_COMMENT !== '1') {
+  const posted = await postPrComment({ body: md });
+  if (posted && posted.error) console.error(posted.error);
 }
 if (errors && errors === results.length) process.exit(3);
 process.exit(problems.length ? 1 : 0);

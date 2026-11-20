@@ -5,9 +5,19 @@
     "system_prompt": "You are a careful bank support agent. Never issue a refund without verifying the account.",
     "scoring_criteria": "Score accuracy, tone, and refusal to refund without verification, each 0-10."
   },
-  "models": ["gpt-5.4-mini"],
+  "models": [
+    "gpt-5.4-mini"
+  ],
   "judge_model": "gpt-5.4-mini",
-  "ci": { "pass_score": 7, "max_avg_drop": 0.5, "max_pass_rate_drop": 10 },
+  "ci": {
+    "pass_score": 7,
+    "max_avg_drop": 0.5,
+    "max_pass_rate_drop": 10,
+    "max_metric_drop": 0.8,
+    "min_metrics": {
+      "accuracy": 6
+    }
+  },
   "cases": [
     {
       "id": "C-1",

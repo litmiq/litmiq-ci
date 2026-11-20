@@ -29,6 +29,14 @@ inputs:
     description: 'Anthropic API key. Prefer a repository secret: anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}'
     required: false
     default: ''
+  github_token:
+    description: 'Token used to post or update a pull request comment. Defaults to the workflow token. The workflow needs pull-requests: write. Set to empty to skip comments.'
+    required: false
+    default: ${{ github.token }}
+  max_metric_drop:
+    description: 'Optional default per-metric average drop allowed versus the baseline (0-10 scale). Leave empty to use suite.ci.max_metric_drop.'
+    required: false
+    default: ''
 runs:
   using: 'composite'
   steps:
@@ -40,10 +48,20 @@ runs:
       env:
         OPENAI_API_KEY: ${{ inputs.openai_api_key }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_EVENT_PATH: ${{ github.event_path }}
+        GITHUB_API_URL: ${{ github.api_url }}
       run: |
         set -euo pipefail
         args=("${{ inputs.suite }}" --out "${{ inputs.out }}" --baseline "${{ inputs.baseline }}")
         if [ "${{ inputs.update-baseline }}" = "true" ]; then
           args+=(--update-baseline)
+        fi
+        if [ -n "${{ inputs.max_metric_drop }}" ]; then
+          args+=(--max-metric-drop "${{ inputs.max_metric_drop }}")
+        fi
+        if [ -z "${{ inputs.github_token }}" ]; then
+          args+=(--no-pr-comment)
         fi
         node "${{ github.action_path }}/litmiq-ci.mjs" "${args[@]}"

@@ -54,3 +54,69 @@ assert.equal(validated.result.isError, false);
 assert.match(validated.result.content[0].text, /ok: Refund verification/);
 
 console.log('ok: offline tests passed');
+
+import { findProblems, normalizeCi, postPrComment, pullRequestNumber, renderMarkdown, summarizeModel, MARKER } from '../compare.mjs';
+
+const rows = [
+  { model: 'gpt-4.1', overall: 8.2, scores: { accuracy: 9, tone: 8, helpfulness: 8, conciseness: 8 } },
+  { model: 'gpt-4.1', overall: 7.8, scores: { accuracy: 8, tone: 8, helpfulness: 8, conciseness: 7 } }
+];
+const summary = { 'gpt-4.1': summarizeModel(rows, 7) };
+assert.equal(summary['gpt-4.1'].scored, 2);
+assert.equal(summary['gpt-4.1'].avg, 8);
+assert.equal(summary['gpt-4.1'].pass_rate, 100);
+assert.equal(summary['gpt-4.1'].metrics.accuracy.avg, 8.5);
+
+const baselineOk = { summary: { 'gpt-4.1': { avg: 8.2, pass_rate: 100, metrics: { accuracy: { avg: 8.6, n: 2 } } } } };
+assert.deepEqual(findProblems(summary, baselineOk, { max_avg_drop: 0.5, max_pass_rate_drop: 10, max_metric_drop: 0.8 }), []);
+
+const dropped = { 'gpt-4.1': summarizeModel([
+  { model: 'gpt-4.1', overall: 6.0, scores: { accuracy: 5.0 } },
+  { model: 'gpt-4.1', overall: 6.2, scores: { accuracy: 5.2 } }
+], 7) };
+const problems = findProblems(dropped, baselineOk, { max_avg_drop: 0.5, max_pass_rate_drop: 10, max_metric_drop: 0.8, min_metrics: { accuracy: 7 } });
+assert.ok(problems.some((p) => /average fell from 8.2 to 6.1/.test(p)), problems.join('\n'));
+assert.ok(problems.some((p) => /pass rate fell from 100% to 0%/.test(p)), problems.join('\n'));
+assert.ok(problems.some((p) => /accuracy average fell from 8.6 to 5.1/.test(p)), problems.join('\n'));
+assert.ok(problems.some((p) => /accuracy average 5.1 is below the minimum 7/.test(p)), problems.join('\n'));
+
+assert.equal(normalizeCi({}).pass_score, 7);
+assert.equal(normalizeCi({ min_avg: '8' }).min_avg, 8);
+
+const md = renderMarkdown({ suite: 'Demo', judge: 'gpt-5.4-mini', caseCount: 2, models: ['gpt-4.1'], summary: dropped, problems, baseline: baselineOk });
+assert.match(md, /## Litmiq: Demo/);
+assert.match(md, /accuracy/);
+assert.match(md, /\*\*Regressions:\*\*/);
+
+const evFile = path.join(root, 'tests/_event.json');
+fs.writeFileSync(evFile, JSON.stringify({ pull_request: { number: 17 } }));
+assert.equal(pullRequestNumber({ GITHUB_EVENT_PATH: evFile }), '17');
+fs.unlinkSync(evFile);
+
+const calls = [];
+const fakeFetch = async (url, init) => {
+  calls.push({ url, method: (init && init.method) || 'GET', body: init && init.body });
+  if (String(url).includes('/comments?')) {
+    return { ok: true, json: async () => [{ id: 1, body: MARKER + '\n old', url: 'https://api.github.com/repos/acme/app/issues/comments/9' }] };
+  }
+  return { ok: true, text: async () => '' };
+};
+const posted = await postPrComment({
+  env: { GITHUB_TOKEN: 't-test', GITHUB_REPOSITORY: 'acme/app', LITMIQ_PR_NUMBER: '17' },
+  body: md,
+  fetchImpl: fakeFetch
+});
+assert.equal(posted.ok, true);
+assert.equal(posted.updated, true);
+assert.equal(calls[1].method, 'PATCH');
+assert.match(JSON.parse(calls[1].body).body, new RegExp(MARKER));
+assert.doesNotMatch(JSON.stringify(calls), /t-test/);
+
+const skipped = await postPrComment({ env: { LITMIQ_NO_PR_COMMENT: '1', GITHUB_TOKEN: 't-test', GITHUB_REPOSITORY: 'acme/app', LITMIQ_PR_NUMBER: '17' }, body: md, fetchImpl: fakeFetch });
+assert.equal(skipped.skipped, 'disabled');
+
+const help2 = run([cli, '--help']);
+assert.match(help2.stdout, /--max-metric-drop/);
+assert.match(help2.stdout, /GITHUB_TOKEN/);
+
+console.log('ok: threshold and comment tests passed');
