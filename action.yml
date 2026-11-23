@@ -37,6 +37,14 @@ inputs:
     description: 'Optional default per-metric average drop allowed versus the baseline (0-10 scale). Leave empty to use suite.ci.max_metric_drop.'
     required: false
     default: ''
+  evidence:
+    description: 'Where to write the SHA-256 hashed compliance evidence record (prompt hashes, commit, run URL, thresholds, verdict, baseline hash, PR approvals). Set to empty to skip. Upload it with actions/upload-artifact to keep it with the run.'
+    required: false
+    default: 'litmiq-evidence.json'
+outputs:
+  evidence:
+    description: 'Path of the evidence record, if one was written.'
+    value: ${{ steps.run.outputs.evidence }}
 runs:
   using: 'composite'
   steps:
@@ -44,6 +52,7 @@ runs:
       shell: bash
       run: node "${{ github.action_path }}/litmiq-ci.mjs" "${{ inputs.suite }}" --validate
     - name: Run the Litmiq suite
+      id: run
       shell: bash
       env:
         OPENAI_API_KEY: ${{ inputs.openai_api_key }}
@@ -52,6 +61,7 @@ runs:
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_EVENT_PATH: ${{ github.event_path }}
         GITHUB_API_URL: ${{ github.api_url }}
+        LITMIQ_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       run: |
         set -euo pipefail
         args=("${{ inputs.suite }}" --out "${{ inputs.out }}" --baseline "${{ inputs.baseline }}")
@@ -63,5 +73,9 @@ runs:
         fi
         if [ -z "${{ inputs.github_token }}" ]; then
           args+=(--no-pr-comment)
+        fi
+        if [ -n "${{ inputs.evidence }}" ]; then
+          args+=(--evidence "${{ inputs.evidence }}")
+          echo "evidence=${{ inputs.evidence }}" >> "$GITHUB_OUTPUT"
         fi
         node "${{ github.action_path }}/litmiq-ci.mjs" "${args[@]}"

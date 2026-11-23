@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // litmiq-ci.mjs: run a Litmiq suite in CI with your own API keys (https://litmiq.com). No dependencies; Node 18+.
-// Usage: node litmiq-ci.mjs litmiq-suite.json [--validate] [--out litmiq-results.json] [--baseline litmiq-baseline.json] [--update-baseline] [--max-avg-drop n] [--max-pass-rate-drop n] [--min-avg n] [--min-pass-rate n] [--max-metric-drop n] [--no-pr-comment]
+// Usage: node litmiq-ci.mjs litmiq-suite.json [--validate] [--out litmiq-results.json] [--baseline litmiq-baseline.json] [--update-baseline] [--max-avg-drop n] [--max-pass-rate-drop n] [--min-avg n] [--min-pass-rate n] [--max-metric-drop n] [--no-pr-comment] [--evidence file]
+//        node litmiq-ci.mjs --verify-evidence litmiq-evidence.json
 // Env: OPENAI_API_KEY (OpenAI models / judge), ANTHROPIC_API_KEY (Claude models / judge),
 //      LITMIQ_ALERT_WEBHOOK (optional Slack-compatible incoming webhook, posted to only when a regression is found),
 //      OPENAI_BASE_URL / ANTHROPIC_BASE_URL (optional, for proxies or tests),
@@ -9,6 +10,7 @@
 // Scoring mirrors the Litmiq app: one judge call per output, metrics 0-10, "pass" = overall >= 7. Missing scores are never invented.
 import fs from 'node:fs';
 import { findProblems, normalizeCi, postPrComment, renderMarkdown, summarizeModel } from './compare.mjs';
+import { buildCiRecord, filePayload, prApprovals, verifyPayload } from './evidence.mjs';
 
 const JUDGE_SYSTEM = `You are an expert LLM output evaluator. Given a system prompt, user input, model output, and scoring criteria, evaluate the output on each metric and return a JSON object.
 
@@ -26,7 +28,7 @@ Return ONLY valid JSON in this exact format:
 
 const args = process.argv.slice(2);
 const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? (args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : true) : null; };
-const USAGE = 'usage: node litmiq-ci.mjs <suite.json> [--validate] [--out file] [--baseline file] [--update-baseline] [--max-avg-drop n] [--max-pass-rate-drop n] [--min-avg n] [--min-pass-rate n] [--max-metric-drop n] [--no-pr-comment]';
+const USAGE = 'usage: node litmiq-ci.mjs <suite.json> [--validate] [--out file] [--baseline file] [--update-baseline] [--max-avg-drop n] [--max-pass-rate-drop n] [--min-avg n] [--min-pass-rate n] [--max-metric-drop n] [--no-pr-comment] [--evidence file]\n       node litmiq-ci.mjs --verify-evidence <evidence.json>';
 if (flag('--help') || flag('-h')) {
   console.log(`litmiq-ci — run a Litmiq suite in CI with your own API keys (https://litmiq.com).
 
@@ -42,16 +44,29 @@ ${USAGE}
   --min-pass-rate n   Override suite.ci.min_pass_rate (percentage floor)
   --max-metric-drop n Override suite.ci.max_metric_drop (per-metric score, 0-10)
   --no-pr-comment     Do not post or update a pull request comment
+  --evidence file     Also write a timestamped SHA-256 hashed evidence record (prompt hashes, git commit, run URL,
+                      thresholds, verdict, baseline hash, PR approvals). Same format as the Litmiq app's evidence pack.
+  --verify-evidence file  Recompute the SHA-256 of an evidence file (app or CI). Exit 0 = match, 1 = mismatch, 2 = not an evidence file.
 
 Exit codes: 0 = pass, 1 = regression or threshold miss, 2 = usage/config error, 3 = provider errors on every call.
 Env: OPENAI_API_KEY, ANTHROPIC_API_KEY, optional OPENAI_BASE_URL / ANTHROPIC_BASE_URL, optional LITMIQ_ALERT_WEBHOOK, optional GITHUB_TOKEN (posts or updates a pull request comment).
 Scoring mirrors the Litmiq app: one judge call per output, metrics 0-10, pass = overall >= 7. Missing scores are never invented.`);
   process.exit(0);
 }
-const suitePath = args.find((a, i) => !a.startsWith('--') && !(i > 0 && ['--out', '--baseline', '--max-avg-drop', '--max-pass-rate-drop', '--min-avg', '--min-pass-rate', '--max-metric-drop'].includes(args[i - 1])));
+const verifyPath = flag('--verify-evidence');
+if (verifyPath) {
+  if (verifyPath === true) { console.error(USAGE); process.exit(2); }
+  let payload; try { payload = JSON.parse(fs.readFileSync(verifyPath, 'utf8')); } catch (e) { console.error('could not read evidence file:', e.message); process.exit(2); }
+  const v = verifyPayload(payload);
+  if (v.error) { console.error(v.error); process.exit(2); }
+  if (v.ok) { console.log(`ok: SHA-256 matches ${v.actual}`); process.exit(0); }
+  console.error(`MISMATCH: file says ${v.expected}, record hashes to ${v.actual}. The record was changed after it was written.`);
+  process.exit(1);
+}
+const suitePath = args.find((a, i) => !a.startsWith('--') && !(i > 0 && ['--out', '--baseline', '--max-avg-drop', '--max-pass-rate-drop', '--min-avg', '--min-pass-rate', '--max-metric-drop', '--evidence'].includes(args[i - 1])));
 if (!suitePath) { console.error(USAGE); process.exit(2); }
-let suite;
-try { suite = JSON.parse(fs.readFileSync(suitePath, 'utf8')); }
+let suite, suiteText;
+try { suiteText = fs.readFileSync(suitePath, 'utf8'); suite = JSON.parse(suiteText); }
 catch (e) { console.error('could not read suite:', e.message); process.exit(2); }
 if (!suite || !suite.litmiq_fields || !Array.isArray(suite.cases) || !suite.cases.length) { console.error('not a Litmiq suite (litmiq-suite/1)'); process.exit(2); }
 if (flag('--validate')) {
@@ -133,13 +148,23 @@ const summary = {};
 for (const m of models) {
   summary[m] = summarizeModel(results.filter((r) => r.model === m), ci.pass_score);
 }
-let baseline = null; try { baseline = JSON.parse(fs.readFileSync(basePath, 'utf8')); } catch (_) {}
+let baseline = null, baselineText = null; try { baselineText = fs.readFileSync(basePath, 'utf8'); baseline = JSON.parse(baselineText); } catch (_) { baseline = null; baselineText = null; }
 const problems = findProblems(summary, baseline, ci);
 const report = { schema: 'litmiq-results/1', suite: suite.name || 'Litmiq suite', judge_model: judge, ran_at: new Date().toISOString(), ci, summary, regressions: problems, results };
 fs.writeFileSync(outPath, JSON.stringify(report, null, 2) + '\n');
-if (flag('--update-baseline') || (!baseline && !problems.length)) fs.writeFileSync(basePath, JSON.stringify({ schema: 'litmiq-baseline/1', ran_at: report.ran_at, summary }, null, 2) + '\n');
+const baselineUpdated = Boolean(flag('--update-baseline') || (!baseline && !problems.length));
+if (baselineUpdated) fs.writeFileSync(basePath, JSON.stringify({ schema: 'litmiq-baseline/1', ran_at: report.ran_at, summary }, null, 2) + '\n');
+const evidencePath = flag('--evidence');
+let evidenceNote = '';
+if (evidencePath && evidencePath !== true) {
+  const approvals = await prApprovals();
+  const payload = filePayload(buildCiRecord({ suite, suiteText, judge, models, ci, summary, problems, results, baseline, baselineText, baselineUpdated, approvals, ranAt: report.ran_at }));
+  fs.writeFileSync(evidencePath, JSON.stringify(payload, null, 2) + '\n');
+  evidenceNote = `\n\nEvidence record: \`${evidencePath}\` · SHA-256 \`${payload.sha256}\``;
+  console.error(`evidence: wrote ${evidencePath} (sha256 ${payload.sha256})`);
+}
 
-const md = renderMarkdown({ suite: report.suite, judge, caseCount: suite.cases.length, models, summary, problems, baseline });
+const md = renderMarkdown({ suite: report.suite, judge, caseCount: suite.cases.length, models, summary, problems, baseline }) + evidenceNote;
 console.log(md);
 if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + '\n');
 if (problems.length && process.env.LITMIQ_ALERT_WEBHOOK) {

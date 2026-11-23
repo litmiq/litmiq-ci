@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 — 23 November 2026
+
+- Compliance evidence records: `--evidence file` (Action input `evidence`, default `litmiq-evidence.json`, output `evidence`) writes a SHA-256 hashed `litmiq-compliance-evidence-file` record with prompt-version hashes (suite, system prompt, scoring criteria), git context (commit, PR head SHA, ref, run URL, actor), gate verdict, thresholds, missed thresholds, baseline hash, whether a new baseline was written, and approved PR reviews at run time (`null` when unknown).
+- `--verify-evidence file` recomputes the hash for CI records and for packs downloaded from the Litmiq app. Exit 0 match, 1 mismatch, 2 not an evidence file.
+- The PR comment and step summary show the evidence file and its SHA-256.
+
 ## 1.1.0 — 20 November 2026
 
 - Per-metric thresholds: `suite.ci.max_metric_drop`, `max_metric_drops`, `min_metrics`, and `min_pass_rate`, plus CLI flags `--max-avg-drop`, `--max-pass-rate-drop`, `--min-avg`, `--min-pass-rate`, `--max-metric-drop`.

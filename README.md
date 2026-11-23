@@ -21,7 +21,7 @@ node litmiq-ci.mjs path/to/suite.json --validate
 npx github:litmiq/litmiq-ci -- path/to/suite.json --validate
 ```
 
-Flags: `--validate`, `--out file`, `--baseline file`, `--update-baseline`, `--max-avg-drop`, `--max-pass-rate-drop`, `--min-avg`, `--min-pass-rate`, `--max-metric-drop`, `--no-pr-comment`, `--help`.
+Flags: `--validate`, `--out file`, `--baseline file`, `--update-baseline`, `--max-avg-drop`, `--max-pass-rate-drop`, `--min-avg`, `--min-pass-rate`, `--max-metric-drop`, `--no-pr-comment`, `--evidence file`, `--verify-evidence file`, `--help`.
 
 Exit codes: `0` pass, `1` regression or threshold miss, `2` usage or config error, `3` provider errors on every call.
 
@@ -64,9 +64,32 @@ jobs:
           baseline: litmiq/litmiq-baseline.json
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: litmiq-evidence
+          path: litmiq-evidence.json
 ```
 
 A missed threshold or provider error exits non-zero and fails the job. If this workflow is a required status check, GitHub will block the merge. On a pull request the Action posts or updates a single comment with the score table and any missed thresholds, using `GITHUB_TOKEN`. That needs `permissions: pull-requests: write`. Review the workflow and the suite before you rely on them. You can also download this same CLI from the Litmiq app workspace (Pro can export a scheduled workflow).
+
+## Compliance evidence records (1.2.0)
+
+Every Action run writes `litmiq-evidence.json` (CLI: `--evidence file`). It is a timestamped record of the run, hashed with SHA-256, in the same `litmiq-compliance-evidence-file` format as the evidence pack in the Litmiq app. It ties the result to a prompt version and a commit:
+
+- `prompt_version`: SHA-256 of the suite file, the system prompt and the scoring criteria
+- `git`: repository, commit SHA (the PR head on pull requests), ref, event, PR number, workflow, run id, run URL, actor
+- `gate`: verdict (`pass` / `fail`), the thresholds used, every missed threshold, SHA-256 of the baseline it compared against, and whether this run wrote a new baseline
+- `approvals`: approved reviews on the pull request when the run started (reviewer, time, commit). `null` means unknown (not a PR, no token, or the API call failed); it is never filled in
+- per-model averages, pass rates and per-metric averages, plus every case, output, score and judge reasoning (common API-key patterns are removed)
+
+Keep the file with the run (`actions/upload-artifact`) or commit it next to your prompts. Anyone can check it was not edited afterwards:
+
+```bash
+node litmiq-ci.mjs --verify-evidence litmiq-evidence.json   # exit 0 = hash matches, 1 = changed, 2 = not an evidence file
+```
+
+The same command verifies packs downloaded from the Litmiq app. This is evidence of testing, not a certification, not a legal determination and not an audit opinion. Litmiq never receives the file. Set `evidence: ''` to turn it off.
 
 ## MCP connector
 

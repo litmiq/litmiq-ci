@@ -1,6 +1,6 @@
 {
   "name": "litmiq-ci",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Open-source CLI, GitHub Action and MCP connector for Litmiq regression suites. No dependencies. You bring your own provider keys.",
   "type": "module",
   "license": "MIT",
@@ -12,6 +12,7 @@
   "files": [
     "litmiq-ci.mjs",
     "compare.mjs",
+    "evidence.mjs",
     "action.yml",
     "mcp/server.mjs",
     "examples",
